@@ -165,3 +165,47 @@ def test_finish_rotates_the_run_id_so_each_weekly_pass_is_its_own_snapshot(tmp_p
     assert set(runs) == {first, second}
     assert [i["action"] for i in runs[first]["items"]] == ["park"]
     assert [i["action"] for i in runs[second]["items"]] == ["archive"]
+
+
+def test_list_projects_is_compact_enough_for_one_tool_result(gw):
+    """First live pass: 44 projects came back as 76 KB (55 KB of next_step text + every file name),
+    which the client could not use. Clip next_step, drop the file list, keep only the handoff names."""
+    note = gw.backend.root / "Projects/alpha/alpha.md"
+    from glia import frontmatter
+    note.write_text(frontmatter.set_keys(note.read_text(), {"next_step": "x" * 3000}))
+    (gw.backend.root / "Projects/alpha/handoff-2026-03-02-extra.md").write_text("---\ncreated: 2026-03-02\n---\nh\n")
+    r = rpc(gw, "tools/call", {"name": "list_projects", "arguments": {}})["result"]
+    rows = {x["slug"]: x for x in json.loads(r["content"][0]["text"])}
+    a = rows["alpha"]
+    assert "files" not in a
+    assert len(a["next_step"]) <= 241 and a["next_step"].endswith("…")
+    assert sorted(a["handoffs"]) == ["handoff-2026-03-01-alpha.md", "handoff-2026-03-02-extra.md"]
+    assert len(r["content"][0]["text"]) < 400 * len(rows)
+
+
+def test_read_note_lists_an_allowlisted_directory_and_refuses_a_fenced_one(gw):
+    r = rpc(gw, "tools/call", {"name": "read_note", "arguments": {"path": "Tasks/"}})["result"]
+    assert r["isError"] is False
+    listing = json.loads(r["content"][0]["text"])
+    assert "old-done.md" in listing["files"] and "_archive/" in listing["dirs"]
+    r = rpc(gw, "tools/call", {"name": "read_note", "arguments": {"path": "Projects/alpha"}})["result"]
+    assert r["isError"] is False and "alpha.md" in json.loads(r["content"][0]["text"])["files"]
+    for path in ("Finances/", "Departments/legal", "Context/concepts/", "."):
+        r = rpc(gw, "tools/call", {"name": "read_note", "arguments": {"path": path}})["result"]
+        assert r["isError"] is True, path
+
+
+def test_free_form_propose_is_recorded_as_action_propose_with_the_text_in_args(gw):
+    text = "Quote (or trim) the very long unquoted next_step in frontmatter so the YAML parses again and the Dashboard sees it"
+    r = rpc(gw, "tools/call", {"name": "propose", "arguments": {"action": text, "target": "Projects/alpha/alpha.md", "reason": "yaml"}})["result"]
+    assert r["isError"] is False
+    (p,) = gw.backend.proposals()
+    assert p["action"] == "propose" and p["args"]["what"] == text and "free-form" in p["ladder"]["flags"]
+
+
+def test_list_projects_last_log_reads_bullet_dates_too(gw):
+    """Second live pass: an older log uses '- **2026-10-08** — …' bullets under one heading, so last_log was null."""
+    log = gw.backend.root / "Projects/alpha/conversation-log.md"
+    log.write_text("---\ncreated: 2026-01-01\n---\n\n# alpha — Conversation Log\n\n- **2026-10-08** — did a thing\n- **2026-09-29** — earlier\n")
+    rows = {x["slug"]: x for x in json.loads(rpc(gw, "tools/call", {"name": "list_projects", "arguments": {}})["result"]["content"][0]["text"])}
+    assert rows["alpha"]["last_log"] == "2026-10-08"

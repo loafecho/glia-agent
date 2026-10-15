@@ -23,21 +23,71 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def item_line(n: int, it: dict) -> str:
+GROUPS = [("archive", "Archive"), ("park", "Park"), ("fix_frontmatter", "Frontmatter"), ("collapse_handoff", "Handoffs"),
+          ("archive_task", "Tasks"), ("move_loose_file", "Loose files"), ("propose", "Other suggestions")]
+LINE_MAX = 160
+
+
+def short_name(path: str) -> str:
+    """Projects/<slug>/… → slug (plus the file when it is not the folder note); Tasks/x.md → x."""
+    parts = path.strip("/").split("/")
+    if parts[0] == "Projects" and len(parts) >= 2:
+        if len(parts) == 2 or parts[-1] == f"{parts[1]}.md":
+            return parts[1]
+        return f"{parts[1]}/{Path(parts[-1]).stem}"
+    return Path(parts[-1]).stem
+
+
+def clip(text: str, n: int) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= n:
+        return text
+    cut = text[:n].rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:(") + "…"
+
+
+KNOWN_ACTIONS = {k for k, _ in GROUPS}
+
+
+def normalise(it: dict) -> dict:
+    """An action that is not one of the tools is a free-form proposal whose text landed in `action`
+    (an older record shape). Render it as propose + what."""
+    if it.get("action") in KNOWN_ACTIONS:
+        return it
+    return {**it, "action": "propose", "args": {**(it.get("args") or {}), "what": it.get("action", "")}}
+
+
+def item_line(it: dict) -> str:
+    """One channel line: ✅ action **name** → change — reason (clipped). Fits a phone screen."""
+    it = normalise(it)
     args = it.get("args") or {}
-    detail = ""
+    change = ""
     if it["action"] == "fix_frontmatter" and (args.get("set") or args.get("unset")):
-        detail = " → " + ", ".join(f"{k}: {v}" for k, v in (args.get("set") or {}).items())
+        change = " → " + ", ".join(f"{k}: {v}" for k, v in (args.get("set") or {}).items())
         if args.get("unset"):
-            detail += " unset " + ",".join(args["unset"])
-    if it["action"] == "move_loose_file" and args.get("dest"):
-        detail = f" → `{args['dest']}`"
+            change += " unset " + ",".join(args["unset"])
+    elif it["action"] == "move_loose_file" and args.get("dest"):
+        change = f" → {short_name(args['dest'])}"
+    elif it["action"] == "propose" and args.get("what"):
+        change = f" — {clip(args['what'], 70)}"
+    tasks = it.get("ladder", {}).get("open_tasks") or []
+    tail = f" ⚠️ {len(tasks)} open task{'s' if len(tasks) != 1 else ''}" if tasks else ""
+    head = f"✅ {it['action']} **{short_name(it['target'])}**{change}"
+    room = LINE_MAX - len(head) - len(tail) - 3
+    reason = f" — {clip(it.get('reason', ''), room)}" if room > 20 and it.get("reason") else ""
+    return head + reason + tail
+
+
+def detail_lines(n: int, it: dict) -> str:
+    it = normalise(it)
+    args = it.get("args") or {}
     extra = ""
     if it.get("ladder", {}).get("open_tasks"):
-        extra = "\n⚠️ open tasks point at it: " + ", ".join(f"[[{Path(t).stem}]]" for t in it["ladder"]["open_tasks"]) + " (your ✅ acks them)"
+        extra = "\n   ⚠️ open tasks point at it: " + ", ".join(f"[[{Path(t).stem}]]" for t in it["ladder"]["open_tasks"]) + " (your ✅ acks them)"
+    what = f"\n   {args['what']}" if it["action"] == "propose" and args.get("what") else ""
     sha = it.get("sha")
     revert = f"`git revert {sha}`" if sha else f"`git revert <sha-{it.get('id', n)}>`"
-    return f"{n}. {TICK} **{it['action']}** `{it['target']}`{detail}\n{it.get('reason', '')}{extra}\nundo: {revert}"
+    return f"{n}. **{it['action']}** `{it['target']}`{what}\n   {it.get('reason', '')}{extra}\n   undo: {revert}"
 
 
 def approval_from(it: dict) -> dict:
@@ -66,26 +116,37 @@ class Digests:
         tickable = [i for i in items if i.get("ladder", {}).get("tier") != "never"]
         blocked = [i for i in items if i.get("ladder", {}).get("tier") == "never"]
         date = run.get("date") or run.get("finished", "")[:10]
-        head = (f"**Glia weekly digest — {date}** · run `{run.get('run_id', '?')}` · proposer `{run.get('proposer_model', '?')}` · mode propose-only\n"
-                f"{len(tickable)} suggestion(s). Tap {TICK} on a line to approve it; untouched lines are skipped after {DECISION_DAYS} days. "
-                "Each approved item becomes one commit on a glia/* branch, so one `git revert` undoes exactly one item. "
-                "A ✅ records an approval; nothing runs from it.")
+        n = len(tickable)
+        head = (f"**Glia · {date} · {n} suggestion{'s' if n != 1 else ''}** · tick ✅ on a line to approve it · "
+                f"full reasons in the thread · untouched lines expire in {DECISION_DAYS} days · a ✅ records an approval, nothing runs")
         rec = {"posted_at": _now(), "channel": channel, "messages": {}, "decided": {}}
-        post(channel, head)
-        last_is_ping = not blocked and not run.get("summary")
-        for n, it in enumerate(tickable, 1):
-            m = post(channel, item_line(n, it), ping=(last_is_ping and n == len(tickable))) or {}
-            if m.get("id"):
-                api("PUT", f"/channels/{channel}/messages/{m['id']}/reactions/{urllib.parse.quote(TICK)}/@me")
-                rec["messages"][m["id"]] = it["id"]
-        tail = []
-        if blocked:
-            tail.append(f"⛔ {len(blocked)} not tick-able (the ladder never allows these; shown so you can see what Glia reached for):\n"
-                        + "\n".join(f"- {it['action']} `{it['target']}` — {', '.join(it.get('ladder', {}).get('flags', []))}: {it.get('reason', '')}" for it in blocked))
-        if run.get("summary"):
-            tail.append(f"_Glia's summary:_ {run['summary']}")
-        if tail:
-            post(channel, "\n\n".join(tail), ping=True)
+        hm = post(channel, head, ping=True) or {}
+        thread = None
+        if hm.get("id"):
+            t = api("POST", f"/channels/{channel}/messages/{hm['id']}/threads",
+                    {"name": f"Glia {date} · details", "auto_archive_duration": 10080}) or {}
+            thread = t.get("id")
+        numbered = list(enumerate(tickable, 1))
+        for key, title in GROUPS:
+            group = [(k, it) for k, it in numbered if normalise(it)["action"] == key]
+            if not group:
+                continue
+            post(channel, f"**{title}** ({len(group)})")
+            for _, it in group:
+                m = post(channel, item_line(it)) or {}
+                if m.get("id"):
+                    api("PUT", f"/channels/{channel}/messages/{m['id']}/reactions/{urllib.parse.quote(TICK)}/@me")
+                    rec["messages"][m["id"]] = it["id"]
+        if thread:
+            details = [detail_lines(k, it) for k, it in numbered]
+            if blocked:
+                details.append(f"⛔ {len(blocked)} not tick-able (the ladder never allows these; shown so you can see what Glia reached for):\n"
+                               + "\n".join(f"- {it['action']} `{it['target']}` — {', '.join(it.get('ladder', {}).get('flags', []))}: {it.get('reason', '')}" for it in blocked))
+            if run.get("summary"):
+                details.append(f"_Glia's summary:_ {run['summary']}")
+            details.append(f"run `{run.get('run_id', '?')}` · proposer `{run.get('proposer_model', '?')}` · mode propose-only")
+            for block in details:
+                post(thread, block)
         rec["items"] = {it["id"]: it for it in tickable}
         return rec
 
