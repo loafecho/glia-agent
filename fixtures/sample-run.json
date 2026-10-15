@@ -1,0 +1,23 @@
+{
+  "run_id": "r-sample-2026-10-15",
+  "date": "2026-10-15",
+  "proposer_model": "example-model",
+  "mode": "propose-only",
+  "summary": "7 suggestions this week: two project archives, one park, a task archive, two frontmatter fixes, one loose file. One reach into Finances/ was refused by the ladder.",
+  "items": [
+    {"id": "p-1a2b3c4d", "action": "archive", "target": "Projects/legacy-tracker", "reason": "next_step says superseded by alpha; no log entry since 2026-06-02; no open Tasks link it",
+     "args": {}, "ladder": {"tier": "ask", "open_tasks": [], "flags": []}, "status": "proposed"},
+    {"id": "p-2b3c4d5e", "action": "archive", "target": "Projects/token-broker", "reason": "absorbed into the secrets-manager project per the 2026-09-10 log entry",
+     "args": {}, "ladder": {"tier": "ask", "open_tasks": ["Tasks/token-broker-kickoff.md", "Tasks/secrets-cutover.md"], "flags": []}, "status": "proposed"},
+    {"id": "p-3c4d5e6f", "action": "park", "target": "Projects/reading-list", "reason": "no conversation-log entry for 71 days (last 2026-08-05)",
+     "args": {}, "ladder": {"tier": "ask", "open_tasks": [], "flags": []}, "status": "proposed"},
+    {"id": "p-4d5e6f70", "action": "archive_task", "target": "Tasks/uptime-watchdog.md", "reason": "status: done since 2026-09-30",
+     "args": {}, "ladder": {"tier": "ask", "open_tasks": [], "flags": []}, "status": "proposed"},
+    {"id": "p-5e6f7081", "action": "fix_frontmatter", "target": "Projects/push-alerts/push-alerts.md", "reason": "shipped system that never closes: status growing → live per Projects/CLAUDE.md",
+     "args": {"set": {"status": "live"}}, "ladder": {"tier": "ask", "open_tasks": [], "flags": []}, "status": "proposed"},
+    {"id": "p-6f708192", "action": "move_loose_file", "target": "Projects/agent-tooling-analysis.md", "reason": "Projects/ root holds folders and Seeds/ only; research notes go to Intelligence/research/",
+     "args": {"dest": "Intelligence/research/agent-tooling-analysis.md"}, "ladder": {"tier": "ask", "open_tasks": [], "flags": []}, "status": "proposed"},
+    {"id": "p-708192a3", "action": "fix_frontmatter", "target": "Finances/bill-ledger.md", "reason": "status key missing",
+     "args": {"set": {"status": "live"}}, "ladder": {"tier": "never", "open_tasks": [], "flags": ["finances"]}, "status": "refused"}
+  ]
+}
