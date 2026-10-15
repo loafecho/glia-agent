@@ -1,5 +1,7 @@
 """Replay machinery on the fake vault: approved items applied on a scratch branch must reproduce an
 expected commit's names + frontmatter, with one revert line per item."""
+from pathlib import Path
+
 from glia import fakevault
 from glia.apply import Executor, compare_names_and_frontmatter
 
@@ -43,3 +45,21 @@ def test_replay_compare_reports_a_missing_file_and_a_frontmatter_difference(clon
     assert ("Tasks/_archive/old-done.md", "only-in-expected") in kinds
     assert ("Projects/alpha/alpha.md", "frontmatter") in kinds
 
+
+def test_replay_demo_fixture_reproduces_the_hand_made_restructure(tmp_path, capsys):
+    from glia.apply import replay
+    from glia.mergegate import check
+
+    assert replay(Path("fixtures/replay-demo.json"), scratch=True, out_dir=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "REPLAY-OK items=4 applied=4" in out and "revert_lines=4" in out
+    assert len((tmp_path / "replay-reverts.txt").read_text().split("\n")) == 5
+    v = check(tmp_path / "replay.git", "glia/replay")
+    assert v["verdict"] == "ff-merge" and v["other"] == 0
+
+
+def test_replay_refuses_without_scratch(tmp_path):
+    from glia.apply import replay
+
+    assert replay(Path("fixtures/replay-demo.json"), scratch=False, out_dir=tmp_path) == 2
+    assert not (tmp_path / "replay.git").exists()

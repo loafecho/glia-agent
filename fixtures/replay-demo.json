@@ -1,0 +1,30 @@
+{
+ "name": "replay-demo",
+ "source_repo": "fakevault",
+ "branch": "glia/replay",
+ "scope": [
+  "Projects/",
+  "Tasks/"
+ ],
+ "compare": "names + frontmatter of every .md under scope, out_of_scope excluded",
+ "note": "A restructure done by hand on the fixture vault (expected_changes, plain git and text edits), expressed again as approved items for the executor. Replaying the items must reproduce the hand-made result.",
+ "expected_changes": [
+  {"mv": ["Projects/beta", "Projects/_archive/beta"]},
+  {"mv": ["Tasks/old-done.md", "Tasks/_archive/old-done.md"]},
+  {"replace": "Projects/gamma/gamma.md", "old": "status: evergreen\n", "new": "status: live\n"},
+  {"replace": "Projects/alpha/alpha.md", "old": "next_step: ship it\n", "new": "next_step: ship it\nparked: 2026-10-14\n"},
+  {"write": "Projects/Seeds/restructure-2026-10.md", "text": "---\ncreated: 2026-10-14\nstatus: done\n---\nRecord of the October restructure, written by hand.\n"}
+ ],
+ "out_of_scope": [
+  {"path": "Projects/Seeds/restructure-2026-10.md", "why": "the restructure's own record note, written by hand; not a ladder action"}
+ ],
+ "items": [
+  {"id": "demo-01", "action": "archive", "target": "Projects/beta", "stamp": false,
+   "reason": "next_step says closed, superseded by alpha; no open task links it"},
+  {"id": "demo-02", "action": "archive_task", "target": "Tasks/old-done.md", "reason": "status: done"},
+  {"id": "demo-03", "action": "fix_frontmatter", "target": "Projects/gamma/gamma.md", "set": {"status": "live"},
+   "reason": "evergreen is a legacy status value; shipped systems that never close are live"},
+  {"id": "demo-04", "action": "park", "target": "Projects/alpha", "date": "2026-10-14",
+   "reason": "no conversation-log entry for 60+ days"}
+ ]
+}

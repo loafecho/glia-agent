@@ -1,0 +1,37 @@
+# Example user unit for glia-gateway: the propose-only MCP door from an agent sandbox into a dedicated
+# vault clone at ~/glia-vault. Every address below is a documentation placeholder (RFC 5737); replace
+# them with your private network (for example a VPN range), the address this host listens on, and the
+# address of the host that runs the agent sandbox.
+#
+# The bearer token itself is never on disk here: only its sha256 lives in ~/.config/glia/, written by
+#   printf '%s' "$TOKEN" | sha256sum | cut -d' ' -f1 > ~/.config/glia/gateway.token.sha256
+# and the agent sandbox holds the token through its own secret store.
+#
+#   install:  cp systemd/glia-gateway.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+[Unit]
+Description=glia-gateway (propose-only MCP door from an agent sandbox to the vault clone)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=%h/.config/glia/gateway.token.sha256
+ConditionPathIsDirectory=%h/glia-vault/.git
+
+[Service]
+Type=simple
+WorkingDirectory=%h/glia-agent
+ExecStart=/usr/bin/python3 -m glia.gateway \
+  --bind-net 198.51.100.0/24 --bind 198.51.100.10 --port 8792 --allow-src 198.51.100.20 \
+  --token-sha256-file %h/.config/glia/gateway.token.sha256 \
+  --clone %h/glia-vault --state %h/.local/state/glia-gateway
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=%h/glia-agent
+Environment=GLIA_PROPOSER_MODEL=unspecified
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/glia-gateway
+
+[Install]
+WantedBy=default.target
