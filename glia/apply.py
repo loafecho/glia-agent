@@ -25,7 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from glia import frontmatter, ladder
+from glia import frontmatter, handoff_relink, ladder
 from glia.ladder import Refused
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -140,11 +140,29 @@ class Executor:
         archive = self._path(str(src.parent.relative_to(self.root) / "archive-handoffs.md"))
         content = src.read_text()
         head = archive.read_text() if archive.exists() else f"---\ncreated: {today()}\ntags: [handoff, archive]\nstatus: archived\n---\n\nCollapsed handoffs, verbatim, most recent first.\n"
-        section = f"\n\n## {src.name} (collapsed {today()} by glia, {item.get('id', '?')})\n\n{content.rstrip()}\n"
+        # the heading is exactly the filename so [[...archive-handoffs#handoff-x.md|...]] resolves
+        section = f"\n\n## {src.name}\n\n> collapsed {today()} by glia, {item.get('id', '?')}\n\n{content.rstrip()}\n"
         self._write(archive, head.rstrip("\n") + "\n" + section)
         ladder.guard_delete(item["action"], removes=True, preserved_in=archive, content=content)
         git(self.root, "rm", "-q", "--", str(src.relative_to(self.root)))
-        return f"collapse_handoff {ladder.norm(item['target'])} -> {archive.relative_to(self.root)}"
+        arel = str(archive.relative_to(self.root))
+        relinked = self._relink_inbound(src.name, arel)
+        extra = f", repointed {relinked} inbound link(s)" if relinked else ""
+        return f"collapse_handoff {ladder.norm(item['target'])} -> {arel}{extra}"
+
+    def _relink_inbound(self, name: str, arel: str) -> int:
+        """Repoint dangling [[handoff-x]] links at the new archive heading (glia.handoff_relink).
+        Files the ladder forbids are left alone; changed files join this item's commit."""
+        def skip(rel: str) -> bool:
+            try:
+                ladder.check_path(self.root, rel)
+                return False
+            except Refused:
+                return True
+        res = handoff_relink.relink(str(self.root), name, arel, skip=skip)
+        for c in res["changed"]:
+            git(self.root, "add", "--", c["path"])
+        return sum(len(c["links"]) for c in res["changed"])
 
     def _move_loose_file(self, item: dict) -> str:
         src = self._path(item["target"])

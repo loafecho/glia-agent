@@ -107,6 +107,34 @@ def test_collapse_handoff_preserves_every_byte_before_removing_the_file(clone, e
     assert git(clone, "status", "--porcelain") == ""
 
 
+def test_collapse_handoff_heading_is_the_filename_and_inbound_links_are_repointed(clone, ex):
+    (clone / "Tasks/linker.md").write_text(
+        "---\nstatus: open\nnext_step: \"see [[handoff-2026-03-01-alpha|old pickup]]\"\n---\n"
+        "plain [[handoff-2026-03-01-alpha]]\n| a | [[handoff-2026-03-01-alpha]] |\n"
+        "```\n[[handoff-2026-03-01-alpha]] fenced\n```\n")
+    (clone / "Finances/ledger.md").parent.mkdir(exist_ok=True)
+    (clone / "Finances/ledger.md").write_text("money [[handoff-2026-03-01-alpha]]\n")
+    git(clone, "add", "-A")
+    git(clone, "commit", "-q", "-m", "fixture: linkers")
+    out = ex.apply_item({"id": "t9", "action": "collapse_handoff", "target": "Projects/alpha/handoff-2026-03-01-alpha.md",
+                         "reason": "stale"})
+    archive = (clone / "Projects/alpha/archive-handoffs.md").read_text()
+    assert "\n## handoff-2026-03-01-alpha.md\n" in archive
+    t = "Projects/alpha/archive-handoffs#handoff-2026-03-01-alpha.md"
+    linker = (clone / "Tasks/linker.md").read_text()
+    assert f'next_step: "see [[{t}|old pickup]]"' in linker
+    assert f"plain [[{t}|handoff-2026-03-01-alpha]]" in linker
+    assert f"| a | [[{t}\\|handoff-2026-03-01-alpha]] |" in linker
+    assert "```\n[[handoff-2026-03-01-alpha]] fenced\n```" in linker
+    # the ladder forbids Finances/: left as is
+    assert (clone / "Finances/ledger.md").read_text() == "money [[handoff-2026-03-01-alpha]]\n"
+    # one commit carries the collapse and the relink
+    assert git(clone, "status", "--porcelain") == ""
+    files = git(clone, "show", "--name-only", "--format=", "HEAD").split()
+    assert sorted(files) == ["Projects/alpha/archive-handoffs.md", "Projects/alpha/handoff-2026-03-01-alpha.md", "Tasks/linker.md"]
+    assert "repointed 3 inbound link(s)" in str(out)
+
+
 def test_move_loose_file_to_where_the_folder_rule_says(clone, ex):
     ex.apply_item({"id": "t9", "action": "move_loose_file", "target": "Projects/loose-analysis.md",
                    "dest": "Intelligence/research/loose-analysis.md", "reason": "Projects root holds folders only"})
