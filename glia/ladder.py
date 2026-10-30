@@ -8,7 +8,11 @@ Tiers (what the ladder says):
   propose-only  the agent side never writes; every mutating tool records a proposal (guard_agent_write)
   ask           an archive whose project an open Task still points at needs the owner's explicit ack
   never         deleting anything; Finances/, Departments/legal/, Context/concepts/, user.md,
-                CLAUDE.md, the skill library; pushing to main; anything outside the clone
+                CLAUDE.md, the skill library, git metadata (.git/); pushing to main; anything outside the clone
+
+Path guards compare case-insensitively and run on both the path as given and the path after resolving
+symlinks inside the clone, so a link (or a case-folding filesystem) cannot reach a never-touch file
+through an allowed-looking name.
 """
 from __future__ import annotations
 
@@ -56,6 +60,20 @@ def _under(rel: str, prefix: str) -> bool:
     return rel == prefix or rel.startswith(prefix + "/")
 
 
+def _under_ci(rel: str, prefix: str) -> bool:
+    """_under, case-insensitive: the never-touch set must hold on case-folding filesystems too."""
+    return _under(norm(rel).casefold(), prefix.casefold())
+
+
+def resolved_rel(root: Path, rel: str) -> str | None:
+    """The clone-relative path after resolving symlinks, or None when it resolves outside the clone."""
+    root_r = Path(root).resolve()
+    try:
+        return (root_r / norm(rel)).resolve().relative_to(root_r).as_posix()
+    except ValueError:
+        return None
+
+
 # ------------------------------------------------------------------------------------ path guards
 
 def guard_outside_vault(root: Path, rel: str) -> None:
@@ -74,55 +92,67 @@ def guard_outside_vault(root: Path, rel: str) -> None:
 
 def guard_finances(rel: str) -> None:
     for p in NEVER_PREFIXES["finances"]:
-        if _under(rel, p):
+        if _under_ci(rel, p):
             raise Refused("finances", f"{norm(rel)} is under Finances/ (never touched by glia)")
 
 
 def guard_legal(rel: str) -> None:
     for p in NEVER_PREFIXES["legal"]:
-        if _under(rel, p):
+        if _under_ci(rel, p):
             raise Refused("legal", f"{norm(rel)} is under Departments/legal/ (never touched by glia)")
 
 
 def guard_concepts(rel: str) -> None:
     for p in NEVER_PREFIXES["concepts"]:
-        if _under(rel, p):
+        if _under_ci(rel, p):
             raise Refused("concepts", f"{norm(rel)} is a concept page (never touched by glia)")
 
 
 def guard_user_md(rel: str) -> None:
-    if os.path.basename(norm(rel)) == NEVER_BASENAMES["user_md"]:
+    if os.path.basename(norm(rel)).casefold() == NEVER_BASENAMES["user_md"].casefold():
         raise Refused("user_md", f"{norm(rel)} is user.md (never touched by glia)")
 
 
 def guard_claude_md(rel: str) -> None:
-    if os.path.basename(norm(rel)) == NEVER_BASENAMES["claude_md"]:
+    if os.path.basename(norm(rel)).casefold() == NEVER_BASENAMES["claude_md"].casefold():
         raise Refused("claude_md", f"{norm(rel)} is a CLAUDE.md routing index (never touched by glia)")
 
 
 def guard_skill_library(rel: str) -> None:
     r = norm(rel)
-    if any(_under(r, p) for p in SKILL_LIBRARY_PREFIXES) or SKILL_LIBRARY_MARKER in r or SKILL_LIBRARY_MARKER in str(rel):
+    if any(_under_ci(r, p) for p in SKILL_LIBRARY_PREFIXES) or SKILL_LIBRARY_MARKER in r or SKILL_LIBRARY_MARKER in str(rel):
         raise Refused("skill_library", f"{r} belongs to the agent tooling / skill library (never touched by glia)")
 
 
-PATH_GUARDS = (guard_finances, guard_legal, guard_concepts, guard_user_md, guard_claude_md, guard_skill_library)
+def guard_git_dir(rel: str) -> None:
+    """git's own metadata is not a note: no path component may be .git (any case)."""
+    if any(part.casefold() == ".git" for part in norm(rel).split("/")):
+        raise Refused("git_dir", f"{norm(rel)} is inside git metadata (never touched by glia)")
+
+
+PATH_GUARDS = (guard_finances, guard_legal, guard_concepts, guard_user_md, guard_claude_md, guard_skill_library, guard_git_dir)
 
 
 def check_path(root: Path, rel: str) -> str:
-    """Run every path guard; return the normalised relative path when all pass."""
+    """Run every path guard on the path as given and on its symlink-resolved form; return the
+    normalised relative path when all pass."""
     guard_outside_vault(root, rel)
-    guard_skill_library(rel)
-    for g in PATH_GUARDS:
-        g(rel)
+    real = resolved_rel(root, rel)
+    for r in dict.fromkeys(x for x in (str(rel), real) if x is not None):
+        guard_skill_library(r)
+        for g in PATH_GUARDS:
+            g(r)
     return norm(rel)
 
 
 def read_allowed(root: Path, rel: str) -> str:
-    """read_note allowlist: inside the clone, never-set excluded, and under a listed folder."""
+    """read_note allowlist: inside the clone, never-set excluded, and under a listed folder
+    (both as named and after resolving symlinks)."""
     r = check_path(root, rel)
-    if not any(_under(r, p) for p in READ_ALLOW_PREFIXES):
-        raise Refused("read_allowlist", f"{r} is outside the read allowlist")
+    real = resolved_rel(root, rel) or r
+    for x in (r, real):
+        if not any(_under(x, p) for p in READ_ALLOW_PREFIXES):
+            raise Refused("read_allowlist", f"{r} is outside the read allowlist")
     return r
 
 

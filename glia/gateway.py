@@ -36,6 +36,9 @@ from glia.proposals import Store, now_iso
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "glia-gateway", "version": "0.2.0"}
 MAX_BODY = 64 * 1024
+REQUEST_TIMEOUT = 30      # seconds a connection may sit idle before the handler gives up on it
+MAX_CONNECTIONS = 32      # concurrent connections served; more are closed at accept
+LOG_PATH_CLIP = 256       # a denied request's target is logged clipped (it is attacker-sized before auth)
 PROPOSER_MODEL = os.environ.get("GLIA_PROPOSER_MODEL", "unspecified")   # recorded in each run snapshot for the digest
 CLIP = 12000
 NEXT_STEP_CLIP = 240      # 44 projects × long next_step came to 76 KB, more than one tool result can carry
@@ -116,16 +119,26 @@ class ProposeOnlyBackend:
         return self.store.for_run()
 
     # -------------------------------------------------------------- reads
+    def _readable(self, p: Path) -> bool:
+        """read_note's own test (inside the clone after symlinks, never-set excluded, allowlisted)."""
+        try:
+            ladder.read_allowed(self.root, str(p.relative_to(self.root)))
+            return True
+        except Refused:
+            return False
+
     def list_projects(self, a: dict) -> str:
         rows = []
         for d in sorted((self.root / "Projects").iterdir()):
             if not d.is_dir() or d.name in ("Seeds", "_archive") or d.name.startswith((".", "_")):
                 continue
+            if not self._readable(d):
+                continue
             note = d / f"{d.name}.md"
-            fm = frontmatter.parse(note.read_text(errors="replace")) if note.exists() else {}
+            fm = frontmatter.parse(note.read_text(errors="replace")) if note.exists() and self._readable(note) else {}
             log = d / "conversation-log.md"
             last = None
-            if log.exists():
+            if log.exists() and self._readable(log):
                 # dated headings ("## 2026-10-08 — …") or dated bullets ("- **2026-10-08** — …", the older log style)
                 dates = re.findall(r"^(?:#+\s*|\s*-\s+\**)(\d{4}-\d{2}-\d{2})", log.read_text(errors="replace"), re.M)
                 last = max(dates) if dates else None
@@ -175,6 +188,23 @@ class ProposeOnlyBackend:
                 except Refused as e:
                     tier = "never"
                     flags.append(e.guard)
+        if tool in ("archive", "archive_task") and tier != "never":
+            # these two previews read the filesystem: hold them to the executor's target shape and the
+            # read allowlist first, so a refusal looks the same whether or not the path exists
+            t = ladder.norm(clean(a.get("target"), "target"))
+            if tool == "archive":
+                shape_ok = t.startswith("Projects/") and t.count("/") == 1 and not t.startswith("Projects/_archive")
+            else:
+                shape_ok = t.startswith("Tasks/") and t.count("/") == 1
+            if not shape_ok:
+                tier = "never"
+                flags.append("target_shape")
+            else:
+                try:
+                    ladder.read_allowed(self.root, t)
+                except Refused as e:
+                    tier = "never"
+                    flags.append(e.guard)
         if tool == "archive" and tier != "never":
             try:
                 open_tasks = ladder.open_tasks_linking(self.root, clean(a.get("target"), "target"))
@@ -189,10 +219,29 @@ class ProposeOnlyBackend:
                     tier, flags = "never", flags + [e.guard]
         return {"tier": tier, "open_tasks": open_tasks, "flags": flags}
 
+    @staticmethod
+    def _tool_args(tool: str, a: dict) -> dict:
+        """Only the arguments the tool's inputSchema declares, type-checked. Anything else (an 'action',
+        'id', 'date', ... riding along) is refused: the owner approves what the digest line shows."""
+        declared = set(TOOL_SPECS[tool][1].get("properties", {}))
+        extra = set(a) - declared
+        if extra:
+            raise ToolError(f"unexpected argument(s) for {tool}: {', '.join(sorted(map(str, extra)))}")
+        args = {k: a[k] for k in sorted(declared - {"target", "reason"}) if k in a}
+        if "set" in args:
+            if not isinstance(args["set"], dict) or not all(isinstance(k, str) and frontmatter.KEY_RE.match(k) for k in args["set"]):
+                raise ToolError("set must be an object of plain frontmatter keys")
+        if "unset" in args:
+            if not isinstance(args["unset"], list) or not all(isinstance(k, str) and frontmatter.KEY_RE.match(k) for k in args["unset"]):
+                raise ToolError("unset must be a list of plain frontmatter keys")
+        if "dest" in args:
+            args["dest"] = clean(args["dest"], "dest")
+        return args
+
     def _mutate(self, tool: str, a: dict) -> str:
         target = clean(a.get("target"), "target")
         reason = clean(a.get("reason"), "reason")
-        args = {k: v for k, v in a.items() if k not in ("target", "reason")}
+        args = self._tool_args(tool, a)
         try:
             ladder.guard_agent_write(tool)
         except Refused:
@@ -273,15 +322,47 @@ class Gateway:
         return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
+class GatewayServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a bounded number of connections, and callers outside allow_src
+    closed at accept: before any thread, request parsing or log line."""
+    daemon_threads = True
+
+    def __init__(self, addr, handler, gw: Gateway, max_connections: int = MAX_CONNECTIONS):
+        self.gw = gw
+        self.slots = threading.BoundedSemaphore(max_connections)
+        super().__init__(addr, handler)
+
+    def verify_request(self, request, client_address) -> bool:
+        return client_address[0] in self.gw.allow_src
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
 def make_handler(gw: Gateway):
     class H(BaseHTTPRequestHandler):
         server_version = "glia-gateway/0.2"
+        timeout = REQUEST_TIMEOUT
 
         def log_message(self, fmt, *args):
             pass
 
         def deny(self, code: int, why: str):
-            gw.log({"event": "denied", "code": code, "why": why, "src": self.client_address[0], "path": self.path})
+            gw.log({"event": "denied", "code": code, "why": why, "src": self.client_address[0],
+                    "path": self.path[:LOG_PATH_CLIP], "path_len": len(self.path)})
             self.send_response(code)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -456,7 +537,7 @@ def main(argv=None) -> int:
         print("allow-src must be addresses inside --bind-net", file=sys.stderr)
         return 2
     gw = Gateway(ProposeOnlyBackend(a.clone, a.state), digest, allow, a.state / "calls.jsonl")
-    srv = ThreadingHTTPServer((a.bind, a.port), make_handler(gw))
+    srv = GatewayServer((a.bind, a.port), make_handler(gw), gw)
     gw.log({"event": "start", "bind": f"{a.bind}:{a.port}", "allow_src": sorted(allow), "mode": "propose-only"})
     print(f"glia-gateway (propose-only) on {a.bind}:{a.port}", flush=True)
     try:

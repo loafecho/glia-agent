@@ -5,9 +5,13 @@ other byte of the note where it was (the merge gate relies on "frontmatter-only"
 """
 from __future__ import annotations
 
+import re
+
 import yaml
 
 FENCE = "---"
+KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+LINE_BREAKS = ("\n", "\r", "\x85", "\u2028", "\u2029")
 
 
 def split(text: str) -> tuple[str | None, str]:
@@ -42,6 +46,9 @@ def _render(value) -> str:
     if value is None:
         return ""
     s = str(value)
+    if any(c in s for c in LINE_BREAKS) or not s.isprintable():
+        # a line break or control character would end the scalar and start new YAML keys: one double-quoted line
+        return yaml.safe_dump(s, default_style='"', width=1 << 30).strip()
     if s == "" or s[0] in "&*!|>'\"%@`#" or ": " in s or s.strip() != s:
         return yaml.safe_dump(s, default_flow_style=True).strip()
     return s
@@ -50,6 +57,9 @@ def _render(value) -> str:
 def set_keys(text: str, updates: dict, unset: list[str] | None = None) -> str:
     """Set/replace top-level keys and drop `unset` ones, editing only the frontmatter block."""
     unset = list(unset or [])
+    for key in [*updates, *unset]:
+        if not isinstance(key, str) or not KEY_RE.match(key):
+            raise ValueError(f"bad frontmatter key {key!r}")
     head, body = split(text)
     lines = [] if head is None else head.split("\n")
     out: list[str] = []

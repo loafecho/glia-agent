@@ -105,3 +105,22 @@ def test_agent_side_writes_are_always_refused_in_propose_only_mode():
     assert ladder.PROPOSE_ONLY is True
     for tool in ladder.MUTATING_TOOLS:
         assert refused_by(ladder.guard_agent_write, tool) == "agent_write"
+
+
+@parametrize("rel", [".git/config", ".git/HEAD", "Projects/../.git/hooks/pre-commit", ".GIT/config", "Projects/x/.git/config"])
+def test_git_metadata_is_never_a_target(clone, rel):
+    assert refused_by(ladder.check_path, clone, rel) == "git_dir"
+
+
+def test_a_symlink_inside_the_clone_cannot_reach_a_never_path(clone):
+    (clone / "Projects" / "leak").symlink_to("../Finances")
+    (clone / "Projects/alpha/l.md").symlink_to("../../Finances/bill-ledger.md")
+    assert refused_by(ladder.check_path, clone, "Projects/leak/bill-ledger.md") == "finances"
+    assert refused_by(ladder.check_path, clone, "Projects/alpha/l.md") == "finances"
+    assert refused_by(ladder.read_allowed, clone, "Projects/leak/bill-ledger.md") == "finances"
+
+
+@parametrize("rel,guard", [("finances/bill-ledger.md", "finances"), ("Projects/alpha/claude.md", "claude_md"),
+                           ("USER.md", "user_md"), ("departments/Legal/x.md", "legal")])
+def test_never_guards_ignore_case(clone, rel, guard):
+    assert refused_by(ladder.check_path, clone, rel) == guard

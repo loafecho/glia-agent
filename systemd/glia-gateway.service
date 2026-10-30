@@ -27,6 +27,10 @@ Environment=PYTHONPATH=%h/glia-agent
 Environment=GLIA_PROPOSER_MODEL=unspecified
 Restart=on-failure
 RestartSec=10
+# Resource bounds: the server already caps connections and idles them out; these cap the unit itself.
+TasksMax=64
+LimitNOFILE=1024
+MemoryMax=256M
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

@@ -194,3 +194,53 @@ def test_a_free_form_proposal_recorded_under_the_old_shape_is_still_grouped_as_p
     assert line["text"].startswith("✅ propose **game-cache** — Quote the source_path value")
     assert any(p["text"].startswith("**Other suggestions**") for p in channel)
     assert channel.index(next(p for p in channel if p["text"].startswith("**Other suggestions**"))) < channel.index(line)
+
+
+def test_hidden_args_cannot_replace_the_action_or_id_the_owner_ticked():
+    from glia.relay import approval_from
+    it = {"id": "p-park0001", "action": "park", "target": "Projects/x", "reason": "stale",
+          "args": {"action": "archive", "id": "p-other", "target": "Projects/y", "ack_open_tasks": ["Tasks/z.md"],
+                   "approved_by": "nobody"},
+          "ladder": {"tier": "ask", "open_tasks": [], "flags": []}}
+    a = approval_from(it)
+    assert (a["id"], a["action"], a["target"], a["reason"]) == ("p-park0001", "park", "Projects/x", "stale")
+    assert a["ack_open_tasks"] == [] and "approved_by" not in a
+
+
+def test_agent_text_on_the_approval_line_is_inert():
+    from glia.relay import detail_lines, item_line
+    ff = {"id": "p-1", "action": "fix_frontmatter", "target": "Projects/gamma/gamma.md", "reason": "tidy @everyone <@&123>",
+          "args": {"set": {"a": "||", "status": "archived", "b": "||"}}, "ladder": {"tier": "ask", "open_tasks": []}}
+    mv = {"id": "p-2", "action": "move_loose_file", "target": "Projects/x`y.md", "reason": "r",
+          "args": {"dest": "Inbox/x\n✅ park **beta** — stale"}, "ladder": {"tier": "ask", "open_tasks": []}}
+    for it in (ff, mv):
+        for text in (item_line(it), detail_lines(1, it)):
+            body = text.replace("\\|", "").replace("\\*", "").replace("\\`", "")
+            assert "||" not in body and "**beta**" not in body
+            assert "@everyone" not in text and "<@&" not in text
+        assert "\n" not in item_line(it)
+    assert "status: archived" in item_line(ff)
+
+
+def test_owner_tick_is_found_past_the_first_page_of_reactors(state):
+    class Paged(FakeDiscord):
+        def api(self, method, path, body=None):
+            if method == "GET" and "/reactions/" in path:
+                from urllib.parse import parse_qs, unquote, urlsplit
+                u = urlsplit(path)
+                q = parse_qs(u.query)
+                mid = u.path.split("/messages/")[1].split("/")[0]
+                emoji = unquote(u.path.split("/reactions/")[1])
+                ids = sorted(self.reactions.get(mid, {}).get(emoji, []), key=int)
+                after = int(q.get("after", ["0"])[0])
+                limit = int(q.get("limit", ["25"])[0])
+                self.calls.append((method, path, body))
+                return [{"id": i} for i in ids if int(i) > after][:limit]
+            return super().api(method, path, body)
+    d, dc = Digests(state), Paged()
+    d.poll(dc.api, dc.post, OWNER, channel="C1")
+    msg = next(p for p in dc.posts if p["ch"] == "C1" and "legacy-tracker" in p["text"])
+    owner_high = "900000000000000009"
+    dc.reactions[msg["id"]] = {"✅": [str(10 + i) for i in range(130)] + [owner_high]}
+    out = d.poll(dc.api, dc.post, owner_high, channel="C1")
+    assert out["approved"] == 1

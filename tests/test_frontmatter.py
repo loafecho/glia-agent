@@ -1,3 +1,5 @@
+import pytest
+
 from glia import frontmatter as fm
 
 
@@ -27,3 +29,20 @@ def test_unset_keys_removes_only_that_key():
     out = fm.set_keys(text, {}, unset=["parked"])
     assert "parked" not in fm.parse(out)
     assert fm.parse(out)["status"] == "growing"
+
+
+def test_a_value_with_line_breaks_stays_one_value_and_adds_no_keys():
+    text = "---\nstatus: growing\n---\nBody.\n"
+    for evil in ("2026-10-01\nnext_step:\n  archive this", "2026-10-01\rstatus: archived", "a b: c", "x\x00y"):
+        out = fm.set_keys(text, {"parked": evil})
+        assert fm.parse(out) == {"status": "growing", "parked": evil}
+        assert out.endswith("---\nBody.\n")
+
+
+def test_a_key_that_is_not_a_plain_name_is_refused():
+    text = "---\nstatus: growing\n---\nBody.\n"
+    for bad in ("a\nb", "x: y", "", " status", "#c"):
+        with pytest.raises(ValueError):
+            fm.set_keys(text, {bad: "v"})
+    with pytest.raises(ValueError):
+        fm.set_keys(text, {}, unset=["a\nb"])

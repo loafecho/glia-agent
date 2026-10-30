@@ -11,12 +11,17 @@ bot's own Discord helpers, so one bot, one token path, and this file has no netw
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
 TICK = "✅"
 DECISION_DAYS = 14          # a line not ticked in two weeks is skipped for good
+REACTION_PAGE = 100         # Discord's maximum page size for a reaction's users
+REACTION_PAGES_MAX = 50     # stop paging after this many pages (5000 reactors)
+RESERVED = {"id", "action", "target", "reason", "ack_open_tasks", "approved_by", "approved_at"}
+_MD_SPECIAL = re.compile(r"([\\*~|`\[\]<>])")   # `_` and `#` left alone: they cannot hide text mid-line
 
 
 def _now() -> str:
@@ -46,6 +51,28 @@ def clip(text: str, n: int) -> str:
     return cut.rstrip(" ,;:(") + "…"
 
 
+def safe(text) -> str:
+    """Agent-written text as inert Discord content: one line, markdown escaped, mentions defused.
+    The owner ticks what the line shows, so the line must not be able to hide or fake anything."""
+    text = " ".join(str(text).split())
+    text = _MD_SPECIAL.sub(r"\\\1", text)
+    return text.replace("@", "@\u200b")
+
+
+def code(text) -> str:
+    """Agent-written text inside a `code span`: one line, no backticks, mentions defused."""
+    return " ".join(str(text).split()).replace("`", "'").replace("@", "@\u200b")
+
+
+def clip_safe(text, n: int) -> str:
+    """clip(), then safe(), still within n characters."""
+    while True:
+        out = safe(clip(text, n))
+        if len(out) <= n or n <= 1:
+            return out
+        n -= max(1, len(out) - n)
+
+
 KNOWN_ACTIONS = {k for k, _ in GROUPS}
 
 
@@ -63,18 +90,18 @@ def item_line(it: dict) -> str:
     args = it.get("args") or {}
     change = ""
     if it["action"] == "fix_frontmatter" and (args.get("set") or args.get("unset")):
-        change = " → " + ", ".join(f"{k}: {v}" for k, v in (args.get("set") or {}).items())
+        change = " → " + ", ".join(f"{safe(k)}: {safe(v)}" for k, v in (args.get("set") or {}).items())
         if args.get("unset"):
-            change += " unset " + ",".join(args["unset"])
+            change += " unset " + ",".join(safe(k) for k in args["unset"])
     elif it["action"] == "move_loose_file" and args.get("dest"):
-        change = f" → {short_name(args['dest'])}"
+        change = f" → {safe(short_name(args['dest']))}"
     elif it["action"] == "propose" and args.get("what"):
-        change = f" — {clip(args['what'], 70)}"
+        change = f" — {clip_safe(args['what'], 70)}"
     tasks = it.get("ladder", {}).get("open_tasks") or []
     tail = f" ⚠️ {len(tasks)} open task{'s' if len(tasks) != 1 else ''}" if tasks else ""
-    head = f"✅ {it['action']} **{short_name(it['target'])}**{change}"
+    head = f"✅ {safe(it['action'])} **{safe(short_name(it['target']))}**{change}"
     room = LINE_MAX - len(head) - len(tail) - 3
-    reason = f" — {clip(it.get('reason', ''), room)}" if room > 20 and it.get("reason") else ""
+    reason = f" — {clip_safe(it.get('reason', ''), room)}" if room > 20 and it.get("reason") else ""
     return head + reason + tail
 
 
@@ -83,18 +110,18 @@ def detail_lines(n: int, it: dict) -> str:
     args = it.get("args") or {}
     extra = ""
     if it.get("ladder", {}).get("open_tasks"):
-        extra = "\n   ⚠️ open tasks point at it: " + ", ".join(f"[[{Path(t).stem}]]" for t in it["ladder"]["open_tasks"]) + " (your ✅ acks them)"
-    what = f"\n   {args['what']}" if it["action"] == "propose" and args.get("what") else ""
+        extra = "\n   ⚠️ open tasks point at it: " + ", ".join(f"[[{safe(Path(t).stem)}]]" for t in it["ladder"]["open_tasks"]) + " (your ✅ acks them)"
+    what = f"\n   {safe(args['what'])}" if it["action"] == "propose" and args.get("what") else ""
     sha = it.get("sha")
-    revert = f"`git revert {sha}`" if sha else f"`git revert <sha-{it.get('id', n)}>`"
-    return f"{n}. **{it['action']}** `{it['target']}`{what}\n   {it.get('reason', '')}{extra}\n   undo: {revert}"
+    revert = f"`git revert {code(sha)}`" if sha else f"`git revert <sha-{code(it.get('id', n))}>`"
+    return f"{n}. **{safe(it['action'])}** `{code(it['target'])}`{what}\n   {safe(it.get('reason', ''))}{extra}\n   undo: {revert}"
 
 
 def approval_from(it: dict) -> dict:
     """Flatten a proposal into what the approval executor's apply_item takes: id, action, target, reason, args at top level,
     plus the open tasks the owner's ✅ acknowledged."""
-    out = {"id": it["id"], "action": it["action"], "target": it["target"], "reason": it.get("reason", "")}
-    out.update(it.get("args") or {})
+    out = {k: v for k, v in (it.get("args") or {}).items() if k not in RESERVED}
+    out.update({"id": it["id"], "action": it["action"], "target": it["target"], "reason": it.get("reason", "")})
     out["ack_open_tasks"] = list(it.get("ladder", {}).get("open_tasks") or [])
     return out
 
@@ -141,16 +168,30 @@ class Digests:
             details = [detail_lines(k, it) for k, it in numbered]
             if blocked:
                 details.append(f"⛔ {len(blocked)} not tick-able (the ladder never allows these; shown so you can see what Glia reached for):\n"
-                               + "\n".join(f"- {it['action']} `{it['target']}` — {', '.join(it.get('ladder', {}).get('flags', []))}: {it.get('reason', '')}" for it in blocked))
+                               + "\n".join(f"- {safe(it['action'])} `{code(it['target'])}` — {safe(', '.join(it.get('ladder', {}).get('flags', [])))}: {safe(it.get('reason', ''))}" for it in blocked))
             if run.get("summary"):
-                details.append(f"_Glia's summary:_ {run['summary']}")
-            details.append(f"run `{run.get('run_id', '?')}` · proposer `{run.get('proposer_model', '?')}` · mode propose-only")
+                details.append(f"_Glia's summary:_ {safe(run['summary'])}")
+            details.append(f"run `{code(run.get('run_id', '?'))}` · proposer `{code(run.get('proposer_model', '?'))}` · mode propose-only")
             for block in details:
                 post(thread, block)
         rec["items"] = {it["id"]: it for it in tickable}
         return rec
 
     # ------------------------------------------------------------------ ticks
+    @staticmethod
+    def _owner_ticked(api, channel: str, mid: str, owner: str) -> bool:
+        """Page through every user who reacted ✅ (Discord pages by user id) until the owner shows up."""
+        base = f"/channels/{channel}/messages/{mid}/reactions/{urllib.parse.quote(TICK)}?limit={REACTION_PAGE}"
+        after = None
+        for _ in range(REACTION_PAGES_MAX):
+            users = api("GET", base + (f"&after={after}" if after else "")) or []
+            if any(u.get("id") == owner for u in users):
+                return True
+            if len(users) < REACTION_PAGE or not users[-1].get("id"):
+                return False
+            after = users[-1]["id"]
+        return False
+
     def _record(self, run_id: str, it: dict, by: str) -> None:
         self.approvals.mkdir(parents=True, exist_ok=True)
         p = self.approvals / f"{run_id}.json"
@@ -180,8 +221,7 @@ class Digests:
             for mid, pid in rec["messages"].items():
                 if pid in rec["decided"]:
                     continue
-                users = api("GET", f"/channels/{rec['channel']}/messages/{mid}/reactions/{urllib.parse.quote(TICK)}?limit=25") or []
-                if not any(u.get("id") == owner for u in users):
+                if not self._owner_ticked(api, rec["channel"], mid, owner):
                     continue
                 it = rec["items"].get(pid)
                 if not it or it.get("ladder", {}).get("tier") == "never":

@@ -13,6 +13,7 @@ from glia import fakevault
 from glia.gateway import TOOL_ORDER, Gateway, ProposeOnlyBackend, bind_allowed, make_handler, parse_nets
 
 fixture = pytest.fixture
+parametrize = pytest.mark.parametrize
 
 
 TOKEN = "test-token-not-a-secret"
@@ -209,3 +210,78 @@ def test_list_projects_last_log_reads_bullet_dates_too(gw):
     log.write_text("---\ncreated: 2026-01-01\n---\n\n# alpha — Conversation Log\n\n- **2026-10-08** — did a thing\n- **2026-09-29** — earlier\n")
     rows = {x["slug"]: x for x in json.loads(rpc(gw, "tools/call", {"name": "list_projects", "arguments": {}})["result"]["content"][0]["text"])}
     assert rows["alpha"]["last_log"] == "2026-10-08"
+
+
+@parametrize("args", [
+    {"target": "Projects/gamma", "reason": "quiet", "action": "archive"},
+    {"target": "Projects/gamma", "reason": "quiet", "id": "p-other"},
+    {"target": "Projects/gamma", "reason": "quiet", "date": "2026-10-01\nnext_step: x"},
+])
+def test_a_mutating_call_with_undeclared_arguments_is_refused_not_recorded(gw, args):
+    r = rpc(gw, "tools/call", {"name": "park", "arguments": args})["result"]
+    assert r["isError"] is True and "unexpected argument" in r["content"][0]["text"]
+    assert gw.backend.proposals() == []
+
+
+def test_fix_frontmatter_keys_must_be_plain_names(gw):
+    r = rpc(gw, "tools/call", {"name": "fix_frontmatter", "arguments": {
+        "target": "Projects/gamma/gamma.md", "set": {"status\nparked": "x"}, "reason": "r"}})["result"]
+    assert r["isError"] is True and gw.backend.proposals() == []
+
+
+def test_archive_previews_do_not_read_outside_the_read_allowlist(gw, clone):
+    (clone / "Context/personal").mkdir(parents=True)
+    (clone / "Context/personal/secret.md").write_text("---\nstatus: open\n---\nprivate\n")
+    (clone / "Tasks/points-at-secret.md").write_text("---\nstatus: open\n---\nsee [[secret]]\n")
+    r = rpc(gw, "tools/call", {"name": "archive", "arguments": {"target": "Context/personal", "reason": "r"}})["result"]
+    assert r["isError"] is True and "points-at-secret" not in r["content"][0]["text"]
+    texts = []
+    for target in ("Context/personal/secret.md", "Context/personal/missing.md"):
+        r = rpc(gw, "tools/call", {"name": "archive_task", "arguments": {"target": target, "reason": "r"}})["result"]
+        texts.append(r["content"][0]["text"].split(" recorded", 1)[1])
+    assert texts[0] == texts[1]
+    assert all(p["ladder"]["tier"] == "never" and p["ladder"]["open_tasks"] == [] for p in gw.backend.proposals())
+
+
+def test_list_projects_skips_entries_that_resolve_outside_the_clone_or_into_a_never_path(gw, clone, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "link.md").write_text("---\nstatus: secret-marker\n---\n")
+    (clone / "Projects/link").symlink_to(outside)
+    (clone / "Projects/money").symlink_to("../Finances")
+    r = rpc(gw, "tools/call", {"name": "list_projects", "arguments": {}})["result"]
+    assert "secret-marker" not in r["content"][0]["text"]
+    assert {x["slug"] for x in json.loads(r["content"][0]["text"])} == {"alpha", "beta", "gamma"}
+
+
+def test_read_note_refuses_a_symlink_into_a_never_path(gw, clone):
+    (clone / "Projects/leak").symlink_to("../Finances")
+    r = rpc(gw, "tools/call", {"name": "read_note", "arguments": {"path": "Projects/leak/bill-ledger.md"}})["result"]
+    assert r["isError"] is True and "finances" in r["content"][0]["text"]
+
+
+def test_server_bounds_idle_connections_and_drops_unknown_sources_at_accept(gw):
+    from glia.gateway import MAX_CONNECTIONS, REQUEST_TIMEOUT, GatewayServer
+    assert make_handler(gw).timeout == REQUEST_TIMEOUT and REQUEST_TIMEOUT > 0
+    srv = GatewayServer.__new__(GatewayServer)     # no socket: only the accept-time checks
+    srv.gw = gw
+    assert srv.verify_request(None, ("127.0.0.1", 1)) is True
+    assert srv.verify_request(None, ("203.0.113.9", 1)) is False
+    assert MAX_CONNECTIONS > 0
+
+
+def test_a_denied_request_logs_a_clipped_target(gw):
+    from glia.gateway import LOG_PATH_CLIP, GatewayServer
+    srv = GatewayServer(("127.0.0.1", 0), make_handler(gw), gw)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        url = f"http://127.0.0.1:{srv.server_address[1]}/" + "x" * 20000
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(urllib.request.Request(url, data=b"{}"), timeout=5)
+        assert e.value.code == 404
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    denied = [json.loads(x) for x in gw.log_path.read_text().splitlines() if '"denied"' in x]
+    assert denied and all(len(d["path"]) <= LOG_PATH_CLIP for d in denied) and denied[-1]["path_len"] > 20000

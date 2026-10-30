@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,17 @@ def today() -> str:
     return dt.date.today().isoformat()
 
 
+def stamp_date(item: dict) -> str:
+    """The date an item stamps: today, or the item's own date only when it is a plain ISO date."""
+    raw = item.get("date")
+    if not raw:
+        return today()
+    try:
+        return dt.date.fromisoformat(str(raw)).isoformat()
+    except ValueError:
+        raise ValueError(f"item date {raw!r} is not an ISO date (YYYY-MM-DD)") from None
+
+
 class Executor:
     def __init__(self, clone: Path, branch: str):
         self.root = Path(clone)
@@ -51,13 +63,18 @@ class Executor:
         ladder.guard_main_push(branch)
         self.branch = branch
         current = git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        self._assert_clean()
         if current != branch:
-            if git(self.root, "status", "--porcelain").strip():
-                raise RuntimeError(f"{self.root} has uncommitted changes; refusing to switch branches")
             exists = git(self.root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip()
             git(self.root, "checkout", "-q", *(() if exists else ("-b",)), branch)
 
     # ------------------------------------------------------------------ helpers
+    def _assert_clean(self) -> None:
+        """A failed item rolls back with reset --hard + clean -fd, so never start on a tree holding
+        someone's uncommitted or untracked work."""
+        if git(self.root, "status", "--porcelain").strip():
+            raise RuntimeError(f"{self.root} has uncommitted or untracked changes; refusing to run (a rollback would discard them)")
+
     def _assert_on_branch(self) -> None:
         current = git(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
         ladder.guard_main_push(current)
@@ -93,11 +110,16 @@ class Executor:
         src = self._path(target)
         dst = self._path(f"Projects/_archive/{slug}")
         acked = ladder.guard_open_task_archive(self.root, target, item.get("ack_open_tasks") or [])
+        date = stamp_date(item) if item.get("stamp", True) else None
+        # the folder moves whole, so every file in it must pass the ladder too (a nested CLAUDE.md, user.md, ...)
+        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            for n in dirnames + filenames:
+                ladder.check_path(self.root, str((Path(dirpath) / n).relative_to(self.root)))
         self._mv(src, dst)
         if item.get("stamp", True):
             note = dst / f"{slug}.md"
             if note.exists():
-                self._write(note, frontmatter.set_keys(note.read_text(), {"status": "archived", "archived_on": item.get("date") or today()}))
+                self._write(note, frontmatter.set_keys(note.read_text(), {"status": "archived", "archived_on": date}))
         extra = f" (open tasks acked: {', '.join(acked)})" if acked else ""
         return f"archive {target} -> Projects/_archive/{slug}{extra}"
 
@@ -118,7 +140,7 @@ class Executor:
         ladder.check_path(self.root, str(note.relative_to(self.root)))
         if not note.exists():
             raise RuntimeError(f"no folder note at {note.relative_to(self.root)}")
-        self._write(note, frontmatter.set_keys(note.read_text(), {"parked": item.get("date") or today()}))
+        self._write(note, frontmatter.set_keys(note.read_text(), {"parked": stamp_date(item)}))
         return f"park {target}"
 
     def _fix_frontmatter(self, item: dict) -> str:
@@ -152,8 +174,13 @@ class Executor:
 
     def _relink_inbound(self, name: str, arel: str) -> int:
         """Repoint dangling [[handoff-x]] links at the new archive heading (glia.handoff_relink).
-        Files the ladder forbids are left alone; changed files join this item's commit."""
+        Files the ladder forbids are left alone, and so are untracked, ignored and symlinked notes (only
+        tracked regular files are rewritten); changed files join this item's commit."""
+        tracked = set(git(self.root, "ls-files", "-z").split("\0")) - {""}
+
         def skip(rel: str) -> bool:
+            if rel not in tracked or (self.root / rel).is_symlink():
+                return True
             try:
                 ladder.check_path(self.root, rel)
                 return False
@@ -183,6 +210,7 @@ class Executor:
         ladder.guard_delete(action)
         if action not in self.ACTIONS:
             raise Refused("delete", f"{action!r} is not a glia action; only {sorted(self.ACTIONS)} exist")
+        self._assert_clean()
         before = git(self.root, "rev-parse", "HEAD").strip()
         try:
             summary = self.ACTIONS[action](self, item)

@@ -69,7 +69,7 @@ The merge gate only classifies the branch. Merging is still a manual step.
 | `fix_frontmatter` | ask: set or unset frontmatter keys, body untouched | — |
 | `collapse_handoff` | ask: copy the note verbatim into `archive-handoffs.md`, then remove it | `delete` if the content did not land |
 | `move_loose_file` | ask: `git mv` inside the clone | `outside_vault` |
-| *(no tool)* | never: delete anything; `Finances/`, `Departments/legal/`, `Context/concepts/`, `user.md`, any `CLAUDE.md`, agent tooling; writing or pushing `main` | `delete`, `finances`, `legal`, `concepts`, `user_md`, `claude_md`, `skill_library`, `main_push` |
+| *(no tool)* | never: delete anything; `Finances/`, `Departments/legal/`, `Context/concepts/`, `user.md`, any `CLAUDE.md`, agent tooling, git metadata (`.git/`); writing or pushing `main` | `delete`, `finances`, `legal`, `concepts`, `user_md`, `claude_md`, `skill_library`, `git_dir`, `main_push` |
 
 The folder names are one vault's layout and live as constants in `glia/ladder.py`. Change them to fit yours.
 
@@ -118,7 +118,7 @@ python3 -m glia.apply --clone ~/glia-vault --branch glia/2026-10-15 --items appr
 
 ```bash
 python3 -m pytest -q          # 100 tests on throwaway fixture vaults
-bash scripts/prove-red.sh     # disables each of the 12 guards in a temp copy; expects RED-OK guards=12/12
+bash scripts/prove-red.sh     # disables each of the 13 guards in a temp copy; expects RED-OK guards=13/13
 ruff check .
 shellcheck scripts/prove-red.sh
 ```

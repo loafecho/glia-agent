@@ -178,3 +178,64 @@ def test_apply_items_reports_per_item_and_each_revert_line_undoes_exactly_that_i
     subprocess.run(["git", "-C", str(clone), "revert", "--no-edit", results[1]["sha"]], check=True, capture_output=True)
     assert "parked" not in fm.parse((clone / "Projects/alpha/alpha.md").read_text())
     assert (clone / "Tasks/_archive/old-done.md").exists()
+
+
+def test_archive_refuses_a_folder_that_carries_a_never_touch_file(clone, ex):
+    (clone / "Projects/beta/CLAUDE.md").write_text("---\ncreated: 2026-01-01\n---\nbeta routing index\n")
+    git(clone, "add", "-A")
+    git(clone, "commit", "-q", "-m", "fixture: nested CLAUDE.md")
+    h = fakevault.tree_hash(clone)
+    with pytest.raises(Refused) as e:
+        ex.apply_item({"id": "x", "action": "archive", "target": "Projects/beta", "reason": "r"})
+    assert e.value.guard == "claude_md"
+    assert fakevault.tree_hash(clone) == h
+    assert (clone / "Projects/beta/CLAUDE.md").exists()
+
+
+@parametrize("action,target", [("park", "Projects/alpha"), ("archive", "Projects/beta")])
+def test_a_stamp_date_that_is_not_an_iso_date_is_refused(clone, ex, action, target):
+    h = fakevault.tree_hash(clone)
+    with pytest.raises(ValueError):
+        ex.apply_item({"id": "x", "action": action, "target": target, "reason": "r", "date": "2026-10-01\nnext_step: archive"})
+    assert fakevault.tree_hash(clone) == h
+
+
+def test_git_metadata_is_refused_as_a_target_or_a_destination(clone, ex):
+    cfg = (clone / ".git/config").read_text()
+    with pytest.raises(Refused) as e:
+        ex.apply_item({"id": "x", "action": "fix_frontmatter", "target": ".git/config", "set": {"status": "x"}, "reason": "r"})
+    assert e.value.guard == "git_dir"
+    with pytest.raises(Refused) as e:
+        ex.apply_item({"id": "y", "action": "move_loose_file", "target": "Projects/loose-analysis.md",
+                       "dest": ".git/hooks/pre-commit", "reason": "r"})
+    assert e.value.guard == "git_dir"
+    assert (clone / ".git/config").read_text() == cfg and (clone / "Projects/loose-analysis.md").exists()
+
+
+def test_executor_refuses_a_dirty_tree_so_a_rollback_cannot_discard_work(clone, ex):
+    scratch = clone / "Projects/alpha/scratch-note.md"
+    scratch.write_text("someone's untracked work\n")
+    with pytest.raises(RuntimeError):
+        ex.apply_item({"id": "x", "action": "move_loose_file", "target": "Projects/loose-analysis.md",
+                       "dest": "Tasks/still-open.md", "reason": "r"})
+    assert scratch.read_text() == "someone's untracked work\n"
+    with pytest.raises(RuntimeError):
+        Executor(clone, "glia/test")
+    assert scratch.exists()
+
+
+def test_relink_leaves_ignored_and_symlinked_notes_alone(clone, ex):
+    (clone / ".gitignore").write_text("scratch/\n")
+    (clone / "Tasks/linker.md").write_text("---\nstatus: open\n---\nsee [[handoff-2026-03-01-alpha]]\n")
+    (clone / "Tasks/link-alias.md").symlink_to("linker.md")
+    git(clone, "add", "-A")
+    git(clone, "commit", "-q", "-m", "fixture: linkers")
+    ignored = clone / "scratch/notes.md"
+    ignored.parent.mkdir()
+    ignored.write_text("private [[handoff-2026-03-01-alpha]]\n")
+    ex.apply_item({"id": "t9", "action": "collapse_handoff", "target": "Projects/alpha/handoff-2026-03-01-alpha.md", "reason": "stale"})
+    assert ignored.read_text() == "private [[handoff-2026-03-01-alpha]]\n"
+    assert (clone / "Tasks/link-alias.md").is_symlink()
+    assert "archive-handoffs#handoff-2026-03-01-alpha.md" in (clone / "Tasks/linker.md").read_text()
+    files = git(clone, "show", "--name-only", "--format=", "HEAD").split()
+    assert "scratch/notes.md" not in files and "Tasks/link-alias.md" not in files
