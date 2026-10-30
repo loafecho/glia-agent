@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pytest ruff==0.15.15
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Lint (shellcheck)
+        run: shellcheck scripts/prove-red.sh
+      - name: Unit tests
+        run: python -m pytest -q
+      - name: Gateway self-test and fence test
+        run: |
+          python -m glia.gateway --selftest
+          python -m glia.gateway --fence-test
+      - name: Replay demo and merge gate
+        run: |
+          python -m glia.apply --replay fixtures/replay-demo.json --scratch
+          python -m glia.mergegate --check glia/replay | tee gate.txt
+          grep -q "GATE verdict=ff-merge" gate.txt
+      - name: Digest dry run
+        run: python -m glia.digest --from fixtures/sample-run.json --dry
+      - name: Every ladder guard is load-bearing
+        run: bash scripts/prove-red.sh
