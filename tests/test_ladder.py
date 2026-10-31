@@ -147,3 +147,10 @@ def test_dangling_symlink_pointing_outside_is_refused(clone, tmp_path):
 @parametrize("rel", ["Projects/WORKSPACE/skill-library/x.md", "Projects/Workspace/Skill-Library/x.md"])
 def test_skill_library_marker_matches_case_insensitively(rel):
     assert refused_by(ladder.guard_skill_library, rel) == "skill_library"
+
+
+def test_guard_outside_vault_refuses_on_its_own(clone):
+    """check_path's resolved-path check overlaps this guard; prove the guard itself still refuses."""
+    for rel in ["../x.md", "/etc/hostname", "zz\\..\\..\\escape.md", "Projects/../../x.md", ".."]:
+        assert refused_by(ladder.guard_outside_vault, clone, rel) == "outside_vault"
+    assert ladder.guard_outside_vault(clone, "Projects/alpha/alpha.md") is None
