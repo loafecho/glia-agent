@@ -285,3 +285,11 @@ def test_a_denied_request_logs_a_clipped_target(gw):
         srv.server_close()
     denied = [json.loads(x) for x in gw.log_path.read_text().splitlines() if '"denied"' in x]
     assert denied and all(len(d["path"]) <= LOG_PATH_CLIP for d in denied) and denied[-1]["path_len"] > 20000
+
+
+def test_readable_is_false_for_a_symlink_loop_instead_of_raising(gw, clone):
+    (clone / "Projects/loop").symlink_to("loop")
+    assert gw.backend._readable(clone / "Projects/loop") is False
+    r = rpc(gw, "tools/call", {"name": "list_projects", "arguments": {}})["result"]
+    slugs = {x["slug"] for x in json.loads(r["content"][0]["text"])}
+    assert "alpha" in slugs and "loop" not in slugs

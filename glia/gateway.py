@@ -124,7 +124,7 @@ class ProposeOnlyBackend:
         try:
             ladder.read_allowed(self.root, str(p.relative_to(self.root)))
             return True
-        except Refused:
+        except (Refused, OSError, RuntimeError, ValueError):   # a looping/unreadable symlink is simply not readable
             return False
 
     def list_projects(self, a: dict) -> str:

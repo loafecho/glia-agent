@@ -124,3 +124,26 @@ def test_a_symlink_inside_the_clone_cannot_reach_a_never_path(clone):
                            ("USER.md", "user_md"), ("departments/Legal/x.md", "legal")])
 def test_never_guards_ignore_case(clone, rel, guard):
     assert refused_by(ladder.check_path, clone, rel) == guard
+
+
+@parametrize("rel", ["zz\\..\\..\\escape.md", "Projects\\zz\\..\\..\\..\\escape.md",
+                     "\\etc\\hostname", "Projects\\..\\..\\x.md"])
+def test_backslash_paths_outside_the_clone_are_refused(clone, rel):
+    assert refused_by(ladder.check_path, clone, rel) == "outside_vault"
+
+
+def test_norm_is_idempotent_on_backslash_paths():
+    for rel in ["a\\..\\b", "Projects\\x\\..\\..\\Finances\\y.md", "a\\\\b\\.\\c\\"]:
+        assert ladder.norm(ladder.norm(rel)) == ladder.norm(rel)
+    assert ladder.norm("a\\..\\b") == "b"
+
+
+def test_dangling_symlink_pointing_outside_is_refused(clone, tmp_path):
+    (clone / "Projects" / "dangling").symlink_to(tmp_path / "nowhere" / "x.md")
+    assert refused_by(ladder.check_path, clone, "Projects/dangling") == "outside_vault"
+    assert refused_by(ladder.read_allowed, clone, "Projects/dangling") == "outside_vault"
+
+
+@parametrize("rel", ["Projects/WORKSPACE/skill-library/x.md", "Projects/Workspace/Skill-Library/x.md"])
+def test_skill_library_marker_matches_case_insensitively(rel):
+    assert refused_by(ladder.guard_skill_library, rel) == "skill_library"

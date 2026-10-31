@@ -52,7 +52,9 @@ class Refused(Exception):
 
 
 def norm(rel: str) -> str:
-    return os.path.normpath(str(rel)).replace("\\", "/")
+    """Treat a backslash as a separator *before* normalising, so "a\\..\\..\\x" collapses to "../x"
+    (replacing after normpath left its ".." uncollapsed and let it past guard_outside_vault)."""
+    return os.path.normpath(str(rel).replace("\\", "/"))
 
 
 def _under(rel: str, prefix: str) -> bool:
@@ -79,7 +81,8 @@ def resolved_rel(root: Path, rel: str) -> str | None:
 def guard_outside_vault(root: Path, rel: str) -> None:
     """The target must stay inside the clone, lexically and after resolving symlinks."""
     rel_s = str(rel)
-    if rel_s.startswith("/") or norm(rel_s) == ".." or norm(rel_s).startswith("../"):
+    n = norm(rel_s)
+    if rel_s.startswith("/") or n.startswith("/") or n == ".." or n.startswith("../"):
         raise Refused("outside_vault", f"{rel_s!r} is not a path inside the vault clone")
     root_r = Path(root).resolve()
     target = (root_r / norm(rel_s))
@@ -120,7 +123,8 @@ def guard_claude_md(rel: str) -> None:
 
 def guard_skill_library(rel: str) -> None:
     r = norm(rel)
-    if any(_under_ci(r, p) for p in SKILL_LIBRARY_PREFIXES) or SKILL_LIBRARY_MARKER in r or SKILL_LIBRARY_MARKER in str(rel):
+    marker = SKILL_LIBRARY_MARKER.casefold()
+    if any(_under_ci(r, p) for p in SKILL_LIBRARY_PREFIXES) or marker in r.casefold() or marker in str(rel).casefold():
         raise Refused("skill_library", f"{r} belongs to the agent tooling / skill library (never touched by glia)")
 
 
@@ -138,6 +142,8 @@ def check_path(root: Path, rel: str) -> str:
     normalised relative path when all pass."""
     guard_outside_vault(root, rel)
     real = resolved_rel(root, rel)
+    if real is None:   # e.g. a dangling symlink to outside: the existence probe stopped at an inside parent
+        raise Refused("outside_vault", f"{str(rel)!r} resolves outside the vault clone")
     for r in dict.fromkeys(x for x in (str(rel), real) if x is not None):
         guard_skill_library(r)
         for g in PATH_GUARDS:
@@ -149,7 +155,7 @@ def read_allowed(root: Path, rel: str) -> str:
     """read_note allowlist: inside the clone, never-set excluded, and under a listed folder
     (both as named and after resolving symlinks)."""
     r = check_path(root, rel)
-    real = resolved_rel(root, rel) or r
+    real = resolved_rel(root, rel)   # never None: check_path refused that
     for x in (r, real):
         if not any(_under(x, p) for p in READ_ALLOW_PREFIXES):
             raise Refused("read_allowlist", f"{r} is outside the read allowlist")
