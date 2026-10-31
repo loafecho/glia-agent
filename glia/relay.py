@@ -31,6 +31,13 @@ def _now() -> str:
 GROUPS = [("archive", "Archive"), ("park", "Park"), ("fix_frontmatter", "Frontmatter"), ("collapse_handoff", "Handoffs"),
           ("archive_task", "Tasks"), ("move_loose_file", "Loose files"), ("propose", "Other suggestions")]
 LINE_MAX = 160
+# Per-field caps on agent-written text the relay posts. The run file is agent output; the relay enforces its
+# own caps instead of trusting the gateway's, so copied note text stays short.
+NAME_CLIP = 60              # a short name or destination on the channel line
+CHANGE_CLIP = 70            # a fix_frontmatter set/unset change on the channel line
+REASON_CLIP = 400           # a reason or proposal text in the thread (the gateway's own reason cap)
+BLOCKED_REASON_CLIP = 160   # a refused (never-tier) item's reason in the thread
+SUMMARY_CLIP = 2000         # the run summary in the thread (the gateway's own summary cap)
 
 
 def short_name(path: str) -> str:
@@ -90,16 +97,17 @@ def item_line(it: dict) -> str:
     args = it.get("args") or {}
     change = ""
     if it["action"] == "fix_frontmatter" and (args.get("set") or args.get("unset")):
-        change = " → " + ", ".join(f"{safe(k)}: {safe(v)}" for k, v in (args.get("set") or {}).items())
+        text = ", ".join(f"{k}: {v}" for k, v in (args.get("set") or {}).items())
         if args.get("unset"):
-            change += " unset " + ",".join(safe(k) for k in args["unset"])
+            text += " unset " + ",".join(str(k) for k in args["unset"])
+        change = " → " + clip_safe(text, CHANGE_CLIP)
     elif it["action"] == "move_loose_file" and args.get("dest"):
-        change = f" → {safe(short_name(args['dest']))}"
+        change = f" → {clip_safe(short_name(args['dest']), NAME_CLIP)}"
     elif it["action"] == "propose" and args.get("what"):
         change = f" — {clip_safe(args['what'], 70)}"
     tasks = it.get("ladder", {}).get("open_tasks") or []
     tail = f" ⚠️ {len(tasks)} open task{'s' if len(tasks) != 1 else ''}" if tasks else ""
-    head = f"✅ {safe(it['action'])} **{safe(short_name(it['target']))}**{change}"
+    head = f"✅ {safe(it['action'])} **{clip_safe(short_name(it['target']), NAME_CLIP)}**{change}"
     room = LINE_MAX - len(head) - len(tail) - 3
     reason = f" — {clip_safe(it.get('reason', ''), room)}" if room > 20 and it.get("reason") else ""
     return head + reason + tail
@@ -111,10 +119,10 @@ def detail_lines(n: int, it: dict) -> str:
     extra = ""
     if it.get("ladder", {}).get("open_tasks"):
         extra = "\n   ⚠️ open tasks point at it: " + ", ".join(f"[[{safe(Path(t).stem)}]]" for t in it["ladder"]["open_tasks"]) + " (your ✅ acks them)"
-    what = f"\n   {safe(args['what'])}" if it["action"] == "propose" and args.get("what") else ""
+    what = f"\n   {clip_safe(args['what'], REASON_CLIP)}" if it["action"] == "propose" and args.get("what") else ""
     sha = it.get("sha")
     revert = f"`git revert {code(sha)}`" if sha else f"`git revert <sha-{code(it.get('id', n))}>`"
-    return f"{n}. **{safe(it['action'])}** `{code(it['target'])}`{what}\n   {safe(it.get('reason', ''))}{extra}\n   undo: {revert}"
+    return f"{n}. **{safe(it['action'])}** `{code(it['target'])}`{what}\n   {clip_safe(it.get('reason', ''), REASON_CLIP)}{extra}\n   undo: {revert}"
 
 
 def approval_from(it: dict) -> dict:
@@ -142,7 +150,7 @@ class Digests:
         items = run.get("items", [])
         tickable = [i for i in items if i.get("ladder", {}).get("tier") != "never"]
         blocked = [i for i in items if i.get("ladder", {}).get("tier") == "never"]
-        date = run.get("date") or run.get("finished", "")[:10]
+        date = code(str(run.get("date") or run.get("finished", ""))[:10])
         n = len(tickable)
         head = (f"**Glia · {date} · {n} suggestion{'s' if n != 1 else ''}** · tick ✅ on a line to approve it · "
                 f"full reasons in the thread · untouched lines expire in {DECISION_DAYS} days · a ✅ records an approval, nothing runs")
@@ -168,9 +176,9 @@ class Digests:
             details = [detail_lines(k, it) for k, it in numbered]
             if blocked:
                 details.append(f"⛔ {len(blocked)} not tick-able (the ladder never allows these; shown so you can see what Glia reached for):\n"
-                               + "\n".join(f"- {safe(it['action'])} `{code(it['target'])}` — {safe(', '.join(it.get('ladder', {}).get('flags', [])))}: {safe(it.get('reason', ''))}" for it in blocked))
+                               + "\n".join(f"- {safe(it['action'])} `{code(it['target'])}` — {safe(', '.join(it.get('ladder', {}).get('flags', [])))}: {clip_safe(it.get('reason', ''), BLOCKED_REASON_CLIP)}" for it in blocked))
             if run.get("summary"):
-                details.append(f"_Glia's summary:_ {safe(run['summary'])}")
+                details.append(f"_Glia's summary:_ {clip_safe(run['summary'], SUMMARY_CLIP)}")
             details.append(f"run `{code(run.get('run_id', '?'))}` · proposer `{code(run.get('proposer_model', '?'))}` · mode propose-only")
             for block in details:
                 post(thread, block)

@@ -244,3 +244,43 @@ def test_owner_tick_is_found_past_the_first_page_of_reactors(state):
     dc.reactions[msg["id"]] = {"✅": [str(10 + i) for i in range(130)] + [owner_high]}
     out = d.poll(dc.api, dc.post, owner_high, channel="C1")
     assert out["approved"] == 1
+
+
+def test_agent_text_reaching_discord_is_capped_per_field(state):
+    """The relay posts agent-written strings straight from the run file. Whatever
+    the gateway clipped (or did not), each field reaches Discord capped: the channel line's change text, the
+    thread's reason / proposal text / refused reasons / summary. 5000-char fields stand in for copied note text."""
+    from glia import relay as r
+    def big(tag):
+        return " ".join([tag] * 1000)                            # 1000 marker words, ~5000 chars
+
+    run = {"run_id": "r-caps", "date": "2026-10-31" + "x" * 500, "summary": big("SUMM"),
+           "items": [
+               {"id": "p-ff", "action": "fix_frontmatter", "target": "Projects/gamma/gamma.md", "reason": big("REAS"),
+                "args": {"set": {"status": big("SETV")}, "unset": ["k" * 3000]}, "ladder": {"tier": "ask", "open_tasks": []}},
+               {"id": "p-mv", "action": "move_loose_file", "target": "Inbox/loose.md", "reason": "r",
+                "args": {"dest": "Archive/" + "D" * 5000 + ".md"}, "ladder": {"tier": "ask", "open_tasks": []}},
+               {"id": "p-pr", "action": "propose", "target": "Projects/gamma/gamma.md", "reason": "r",
+                "args": {"what": big("WHAT")}, "ladder": {"tier": "ask", "open_tasks": []}},
+               {"id": "p-nv", "action": "archive", "target": "Finances/bill-ledger.md", "reason": big("NEVR"),
+                "ladder": {"tier": "never", "open_tasks": [], "flags": ["never-path"]}}]}
+    (state / "runs" / "r-sample-2026-10-15.json").unlink()
+    (state / "runs" / "r-caps.json").write_text(json.dumps(run))
+    d, dc = Digests(state), FakeDiscord()
+    d.poll(dc.api, dc.post, OWNER, channel="C1")
+    channel = [p["text"] for p in dc.posts if p["ch"] == "C1"]
+    thread = "\n".join(p["text"] for p in dc.posts if p["ch"] != "C1")
+    for line in channel:
+        assert len(line) <= 400, len(line)
+
+    def marker(text, tag):
+        return text.count(tag) * (len(tag) + 1)
+
+    assert sum(marker(t, "SETV") for t in channel) <= r.CHANGE_CLIP
+    assert "D" * (r.NAME_CLIP + 1) not in "\n".join(channel)
+    assert marker(thread, "REAS") <= r.REASON_CLIP + 5
+    assert marker(thread, "WHAT") <= r.REASON_CLIP + 5
+    assert marker(thread, "NEVR") <= r.BLOCKED_REASON_CLIP + 5
+    assert marker(thread, "SUMM") <= r.SUMMARY_CLIP + 5
+    assert "x" * 20 not in "\n".join(channel) + thread
+    assert len(thread) < 4000
